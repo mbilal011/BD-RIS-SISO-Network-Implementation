@@ -113,12 +113,13 @@ def generate_circle_and_sectors_3D(IRS_position, radius, L):
 
     # Generate sectors data (lines originating from the IRS center)
     sector_lines = []
-    angles = np.linspace(0, 2 * np.pi, L, endpoint=False)
-    for angle in angles:
-        x_end = x_IRS + circle_radius * np.cos(angle)
-        y_end = y_IRS + circle_radius * np.sin(angle)
-        z_end = 0
-        sector_lines.append(((x_IRS, y_IRS, 0), (x_end, y_end, z_end)))
+    if L > 1:
+        angles = np.linspace(0, 2 * np.pi, L, endpoint=False)
+        for angle in angles:
+            x_end = x_IRS + circle_radius * np.cos(angle)
+            y_end = y_IRS + circle_radius * np.sin(angle)
+            z_end = 0
+            sector_lines.append(((x_IRS, y_IRS, 0), (x_end, y_end, z_end)))
 
     return x_circle, y_circle, z_circle, sector_lines
 
@@ -153,7 +154,11 @@ def generate_IRS_3D(IRS_position, L, edge_length):
     xs, ys, zs = IRS_position
     positions = []
 
-    if L == 2:
+    if L == 1:
+        # Single face with no width in the y direction
+        positions.append([xs - edge_length / 2, ys, zs])
+        positions.append([xs + edge_length / 2, ys, zs])
+    elif L == 2:
         positions.append([xs - edge_length / 2, ys + 0.5, zs])
         positions.append([xs + edge_length / 2, ys + 0.5, zs])
         positions.append([xs - edge_length / 2, ys - 0.5, zs])
@@ -183,7 +188,14 @@ def generate_all_irs_coordinates(IRS_position, L, nIRSrow, nIRScol, edge_length,
     all_coordinates = []
     face_midpoints = []
 
-    if L == 2:
+    if L == 1:
+        start_vertex, end_vertex = vertices[:2]
+        coordinates = generate_irs_coordinates_3D(start_vertex, end_vertex, nIRSrow, nIRScol, z_height)
+        all_coordinates.append(coordinates)
+        
+        midpoint = (start_vertex + end_vertex) / 2
+        face_midpoints.append(midpoint)
+    elif L == 2:
         start_vertex_1, end_vertex_1, start_vertex_2, end_vertex_2 = vertices
         coordinates_1 = generate_irs_coordinates_3D(start_vertex_1, end_vertex_1, nIRSrow, nIRScol, z_height)
         coordinates_2 = generate_irs_coordinates_3D(start_vertex_2, end_vertex_2, nIRSrow, nIRScol, z_height)
@@ -212,7 +224,7 @@ def generate_all_irs_coordinates(IRS_position, L, nIRSrow, nIRScol, edge_length,
 
     return all_coordinates, vertices, face_midpoints
 
-def calculate_distances_3D(locU, locT, face_midpoints, IRS_position):
+def calculate_distances_3D(locU, locT, face_midpoints, IRS_position, L):
     dTU = np.linalg.norm(locU - locT, axis=1)  # Distance from users to base station
     dTU = np.reshape(dTU, (-1, 1))
 
@@ -258,6 +270,54 @@ def plot_edges(ax, vertices, nIRSrow, z_height):
         ax.plot([start_vertex[0], end_vertex[0]],
                 [start_vertex[1], end_vertex[1]],
                 [start_vertex[2] + z_points[-1], end_vertex[2] + z_points[-1]], 'r-')
+        
+def compute_path_gains(dTU, dSU, dTS, M, c0=1e-3, d0=1, aTU=3.5, aSU=2.0, aTS = 2.0):
+    GTU = c0 * (dTU / d0) ** (-aTU)
+    
+    # Initialize GSU and GTS
+    GSU = np.zeros((dSU.shape[0], M))
+    GTS = np.zeros((dTS.shape[0], M))
+    
+    # Compute GSU for each user and each IRS element
+    for k in range(dSU.shape[0]):
+        for m in range(M):
+            GSU[k, m] = c0 * (dSU[k, 0] / d0) ** (-aSU)
+    
+    # Compute GTS for each IRS face and each element
+    for l in range(dTS.shape[0]):
+        for m in range(M):
+            GTS[l, m] = c0 * (dTS[l, 0] / d0) ** (-aTS)
+    
+    return GTU, GSU, GTS
+
+def compute_channels_NOMA(GTU, GSU, GTS, K, L, M, K_factor):
+    hRT = np.zeros(K, dtype=complex)
+    hRI = np.zeros((K, M), dtype=complex)
+    hIT = np.zeros((L, M), dtype=complex)
+
+    for k in range(K):
+        # Compute hRT (channel between BS and users)
+        hRT_LoS = np.exp(1j * 2 * np.pi * np.random.rand())  # Deterministic LoS component
+        hRT_NLoS = np.sqrt(1 / 2) * (np.random.randn() + 1j * np.random.randn())  # NLoS component
+        hRT[k] = np.sqrt(GTU[k]) * (np.sqrt(K_factor / (1 + K_factor)) * hRT_LoS + np.sqrt(1 / (1 + K_factor)) * hRT_NLoS)
+
+        # Compute hRI (channel between IRS and users)
+        for m in range(M):
+            hRI_LoS = np.exp(1j * 2 * np.pi * np.random.rand())  # Deterministic LoS component
+            hRI_NLoS = np.sqrt(1 / 2) * (np.random.randn() + 1j * np.random.randn())  # NLoS component
+            hRI[k, m] = np.sqrt(GSU[k, m]) * (np.sqrt(K_factor / (1 + K_factor)) * hRI_LoS + np.sqrt(1 / (1 + K_factor)) * hRI_NLoS)
+
+    # Compute hIT (channel between IRS and BS)
+    for l in range(L):
+        for m in range(M):
+            hIT_LoS = np.exp(1j * 2 * np.pi * np.random.rand())  # Deterministic LoS component
+            hIT_NLoS = np.sqrt(1 / 2) * (np.random.randn() + 1j * np.random.randn())  # NLoS component
+            hIT[l, m] = np.sqrt(GTS[l, m]) * (np.sqrt(K_factor / (1 + K_factor)) * hIT_LoS + np.sqrt(1 / (1 + K_factor)) * hIT_NLoS)
+    
+    hRT = hRT.reshape(-1, 1)  # Shape: (K, 1)
+    hRI = hRI.transpose()    # Shape: (M, K)
+    
+    return hRT, hRI, hIT
         
 def generate_rician_channel_amplitude(K_factor, shape):
     # Generate LOS component amplitude
@@ -306,17 +366,43 @@ def generate_large_scale_fading(dTS, dSU, Gt, Gr, wavelength, L, eta_RIS, eta_kl
     numerator = (wavelength**4 * Gt * Gr)
     alpha_kl = np.zeros((K, L))
 
-    for k in range(K):
-        l = closest_face_indices[k]  # Closest face for user k
-        dTS_l = dTS[l]  # Distance from BS to face l
-        dSU_k = dSU[k]  # Distance from face l to user k
-
-        denominator = (4**3 * np.pi**4 * dTS_l**eta_RIS * dSU_k**eta_kl * (1 - np.cos(np.pi / L)))
-        alpha_kl[k, l] = numerator / denominator
+    if L == 1:
+        dTS_l = dTS[0]  # Distance from BS to the single face
+        for k in range(K):
+            dSU_k = dSU[k]  # Distance from face to user k
+            denominator = (4**3 * np.pi**4 * dTS_l**eta_RIS * dSU_k**eta_kl)
+            alpha_kl[k, 0] = numerator / denominator
+    else:
+        for k in range(K):
+            l = closest_face_indices[k]  # Closest face for user k
+            dTS_l = dTS[l]  # Distance from BS to face l
+            dSU_k = dSU[k]  # Distance from face l to user k
+            denominator = (4**3 * np.pi**4 * dTS_l**eta_RIS * dSU_k**eta_kl * (1 - np.cos(np.pi / L))**2)
+            alpha_kl[k, l] = numerator / denominator
 
     return alpha_kl
 
-# Define functions for SEP
+def generate_large_scale_fading_new(dTS, dSU, L, K, closest_face_indices):
+    numerator = 1
+    alpha_kl = np.zeros((K, L))
+
+    if L == 1:
+        dTS_l = dTS[0]  # Distance from BS to the single face
+        for k in range(K):
+            dSU_k = dSU[k]  # Distance from face to user k
+            denominator = 1
+            alpha_kl[k, 0] = numerator / denominator
+    else:
+        for k in range(K):
+            l = closest_face_indices[k]  # Closest face for user k
+            dTS_l = dTS[l]  # Distance from BS to face l
+            dSU_k = dSU[k]  # Distance from face l to user k
+            denominator = (1 - np.cos(np.pi / L))**2
+            alpha_kl[k, l] = numerator / denominator
+
+    return alpha_kl
+
+# Define functions for SEP  
 def q_function(x):
     return 0.5 * sp.erfc(x / np.sqrt(2))
 
@@ -325,7 +411,6 @@ def compute_sep_mpsk(snr_linear, B):
     snr_linear = np.maximum(snr_linear, 1e-10)
     sep = 2 * q_function(np.sqrt(2 * snr_linear * np.sin(np.pi / B)**2))
     return sep
-
 
 #  ---------------------------------------------------------New Functions Ending-----------------------------------------------------------------------------------
 
@@ -359,6 +444,8 @@ def compute_rate(SNR):
     SNR_watts = (10**(SNR/10))
     return np.log2(1 + SNR_watts)
 
+def compute_rate_NOMA(SNR):
+    return np.log2(1 + SNR)
 
 def calc_link_budget(rayleigh_channel, distance, path_loss_exponent, transmit_power):
         link_inter = (((np.abs(rayleigh_channel)) / np.sqrt((distance) ** path_loss_exponent)) ** 2) * (transmit_power)
@@ -371,10 +458,8 @@ def compute_noise(noise_floor, bandwidth):
     NOISE_POWER = k*T*bandwidth*noise_floor
     return NOISE_POWER
 
-
 def compute_path_loss(distances, path_loss_exponent):
     return 1 / np.sqrt(distances ** path_loss_exponent)
-
 
 def generate_rayleigh_fading_channel(K, std_mean, std_dev):
     X = np.random.normal(std_mean, std_dev, K) 
@@ -382,17 +467,19 @@ def generate_rayleigh_fading_channel(K, std_mean, std_dev):
     rayleigh_channel = (X + 1j*Y)
     return rayleigh_channel
 
-
 def generate_nakagami_samples(m, omega, size):
     magnitude_samples = np.sqrt(omega) * np.sqrt(np.random.gamma(m, 1, size)) / np.sqrt(np.random.gamma(m - 0.5, 1, size))
     phase_samples = np.random.uniform(0, 2 * np.pi, size=size)
     complex_samples = magnitude_samples * np.exp(1j * phase_samples)
     return complex_samples
 
-
 def compute_SNR(link_budget, noise_floor):
     SNR = link_budget - noise_floor
     return SNR
+
+def compute_SNR_NOMA(link_budget, noise_floor):
+    SNR = link_budget - noise_floor
+    return dBm2pow(SNR)
 
 def wrapTo2Pi(theta):
     return np.mod(theta,2*np.pi)
@@ -707,25 +794,15 @@ def results_array_sharing_practical(K, Ns, Nt, h_dk, h_rk, h_rk_transpose, G, B,
 
     return results_array
 
- 
 def theta_matrix_ideal(continuous, h_dk, h_rk, G_1, K, Ns, L):
-    '''
-        Computes the phase shifts performed by each IRS element.
-        Inputs:
-            continuous = True if phase shifts are modelled as continuous (-pi to pi)
-            h_dk = Direct link from BS to user, shape (K, 1)
-            h_rk = Indirect link from IRS to User, shape (Ns, K)
-            G_1 = Fading channel from BS to IRS faces, shape (L, Ns)
-            K = Num of Users
-            Ns = Num of IRS elements 
-            L = Num of IRS faces
-        Return:
-            Returns theta diagonal matrix, containing ideal phase shifts wrt each IRS element. Shape (K, Ns, Ns)
-    '''
-    theta = np.zeros((K, Ns, Ns), dtype= np.complex128)
+    theta = np.zeros((K, Ns, Ns), dtype=np.complex128)
     for m in range(K):
-        chosen_face = m % L  # Sequentially choose IRS face for each user
-        g_face = G_1[chosen_face, :]  # Select channels from the chosen face
+        if L == 1:
+            g_face = G_1[0, :]  # Select channels from the single face
+        else:
+            chosen_face = m % L  # Sequentially choose IRS face for each user
+            g_face = G_1[chosen_face, :]  # Select channels from the chosen face
+
         theta_n = wrapToPi(np.angle(h_dk[m]) - (np.angle(h_rk[:, m]) + np.angle(g_face)))
         phi_complex = 1 * np.exp(1j * theta_n)
 
@@ -781,21 +858,14 @@ def theta_matrix_practical(continuous, h_dk, h_rk, g, K, Ns, B_min, phi, a, quan
     return theta
 
 def prod_matrix(theta, h_rk_h, G_1, K, Ns, L, closest_face_indices):
-    '''
-        Computes the product matrix of h_rk, g and theta, the numerator for computing link budget.
-        Input: 
-            theta = (Ns*Ns) diagonal matrix of shape (K, Ns, Ns)
-            h_rk_h = Hermitian matrix of indirect link from IRS to User, shape (K, Ns)
-            G_1 = Fading channel from BS to IRS faces, shape (L, Ns)
-            K = Num of Users
-            Ns = Num of IRS elements
-            L = Num of IRS faces
-            closest_face_indices = array of shape (K,) with indices of the closest face for each user
-    '''
     prod_fgtheta = np.zeros((K, 1), dtype=np.complex128)
     for m in range(K):
-        chosen_face = closest_face_indices[m]  # Choose the closest IRS face for each user
-        g_face = G_1[chosen_face, :]  # Select channels from the chosen face
+        if L == 1:
+            g_face = G_1[0, :]  # Select channels from the single face
+        else:
+            chosen_face = closest_face_indices[m]  # Choose the closest IRS face for each user
+            g_face = G_1[chosen_face, :]  # Select channels from the chosen face
+
         prod_f_theta = np.matmul(h_rk_h[m, :], theta[m, :, :])  # Multiply h_rk_h with theta
         prod_fgtheta[m] = np.matmul(prod_f_theta, g_face[:, np.newaxis])  # Multiply with the chosen face's channels
 
