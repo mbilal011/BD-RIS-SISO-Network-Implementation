@@ -395,12 +395,13 @@ def generate_large_scale_fading_new(dTS, dSU, L, K, closest_face_indices):
     else:
         for k in range(K):
             l = closest_face_indices[k]  # Closest face for user k
-            dTS_l = dTS[l]  # Distance from BS to face l
-            dSU_k = dSU[k]  # Distance from face l to user k
             denominator = (1 - np.cos(np.pi / L))**2
             alpha_kl[k, l] = numerator / denominator
 
     return alpha_kl
+
+def moving_average(data, window_size):
+    return np.convolve(data, np.ones(window_size) / window_size, mode='same')
 
 # Define functions for SEP  
 def q_function(x):
@@ -412,15 +413,46 @@ def compute_sep_mpsk(snr_linear, B):
     sep = 2 * q_function(np.sqrt(2 * snr_linear * np.sin(np.pi / B)**2))
     return sep
 
+def compute_noma_rates(arr_SNR_disc, K, power_allocation_factor):
+        """
+        Computes the NOMA rates R1 (near user) and R2 (far user) based on SNR values.
+        
+        Parameters:
+        - arr_SNR_disc: np.array, shape (NUM_SIMULATIONS, K, 1)
+            Array containing SNR values for all users.
+        - K: int
+            Number of users.
+        - power_allocation_factor: float
+            Power allocation factor 'a' for near user.
+        
+        Returns:
+        - arr_rate_disc: np.array, shape (NUM_SIMULATIONS, K, 1)
+            Array containing rate values for all users.
+        """
+        a = power_allocation_factor
+        
+        # Initialize the rate array
+        arr_rate_disc = np.zeros_like(arr_SNR_disc)
+        
+        # Loop through all users and compute rates based on their positions (odd/even)
+        for k in range(K):
+            SNR = arr_SNR_disc[k, 0]
+            
+            if k % 2 == 0:  # Even index corresponds to R1 (near user)
+                arr_rate_disc[k, 0] = np.log2(1 + a * SNR)
+            else:  # Odd index corresponds to R2 (far user)
+                arr_rate_disc[k, 0] = np.log2(1 + (1 - a) * SNR / (a * SNR + 1))
+        
+        return arr_rate_disc
+
 #  ---------------------------------------------------------New Functions Ending-----------------------------------------------------------------------------------
 
 # Function to compute outage probability at each iteration
 def compute_outage_probability(num_users, rate, rate_threshold):
-    outage = 0
+    outage = np.zeros(num_users)
     for j in range(num_users):
-      outage = np.sum(rate[j] < rate_threshold)
-      return outage / num_users
-
+        outage[j] = np.sum(rate[j] < rate_threshold)
+    return outage.reshape(num_users, 1) / num_users
 
 # Function to compute average outage probability
 def compute_average_outage_probability(outage_probabilities):
@@ -933,6 +965,53 @@ def compute_area(GRID_RADIUS):
 
 #     return grid_area, IRS_POSITION_1, IRS_POSITION_2, loc_U , Threshold
 
+def generate_user_positions(L, IRS_position, near_distance, far_distance):
+    """
+    Generates user positions for a given L (number of IRS faces).
+    For each face, one near user and one far user are generated at the center of each sector.
+
+    Parameters:
+    L (int): Number of IRS faces
+    IRS_position (tuple): Position of the IRS (x, y, z)
+    near_distance (float): Distance of the near user from the IRS
+    far_distance (float): Distance of the far user from the IRS
+
+    Returns:
+    np.array: User positions array of shape (K, 3) where K = 2*L
+    int: Number of users, K
+    """
+    x_IRS, y_IRS, z_IRS = IRS_position
+    user_positions = []
+
+    # Calculate the angular span for each sector
+    sector_angle = 2 * np.pi / L
+
+    # Define the center angle for each sector
+    center_angles = np.linspace(sector_angle / 2, 2 * np.pi - sector_angle / 2, L, endpoint=True)
+
+    for center_angle in center_angles:
+        # Near user position in the middle of the sector
+        x_near = x_IRS + near_distance * np.cos(center_angle)
+        y_near = y_IRS + near_distance * np.sin(center_angle)
+        z_near = 0  # Assuming users are at ground level
+
+        # Far user position in the middle of the sector
+        x_far = x_IRS + far_distance * np.cos(center_angle)
+        y_far = y_IRS + far_distance * np.sin(center_angle)
+        z_far = 0  # Assuming users are at ground level
+
+        # Append positions to the list
+        user_positions.append([x_near, y_near, z_near])
+        user_positions.append([x_far, y_far, z_far])
+
+    # Convert list to numpy array
+    user_positions = np.array(user_positions)
+
+    # Number of users, K
+    K = user_positions.shape[0]
+
+    return user_positions, K
+
 def generate_positions_IRS(GRID_RADIUS):
         IRS_X = np.zeros(4)
         IRS_Y = np.zeros(4)
@@ -944,3 +1023,4 @@ def generate_positions_IRS(GRID_RADIUS):
         IRS_POSITIONS_1 = np.column_stack((IRS_X, IRS_Y, IRS_Z))
         IRS_POSITIONS_2 = np.column_stack((IRS_X, -IRS_Y, IRS_Z))
         return IRS_POSITIONS_1, IRS_POSITIONS_2
+
